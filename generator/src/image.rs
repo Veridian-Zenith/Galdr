@@ -106,7 +106,8 @@ fn add_init_binary(entries: &mut Vec<ImageEntry>) -> Result<()> {
     let init_path = option_env!("GALDR_INIT_PATH").unwrap_or("target/release/galdr-init");
 
     if Path::new(init_path).exists() {
-        add_file(entries, "sbin/galdr-init", Path::new(init_path), 0o755)?;
+        add_file(entries, "sbin/init", Path::new(init_path), 0o755)?;
+        add_symlink(entries, "sbin/galdr-init", "/sbin/init");
     } else {
         eprintln!("[galdr] WARNING: Init binary not found at {}", init_path);
         eprintln!("[galdr] Build it first: cargo build --release -p galdr-init");
