@@ -4,7 +4,7 @@ set -e
 ROOTFS_SIZE=256
 ROOTFS_IMG="/tmp/galdr-test-rootfs.img"
 INITRD_IMG="/tmp/galdr-test-initrd.img"
-KERNEL="/boot/vmlinuz-linux"
+KERNEL="/boot/vmlinuz-linux-cachyos-eevdf-lto"
 
 echo "[galdr-test] Building initramfs..."
 cargo build --release --workspace
