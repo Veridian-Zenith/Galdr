@@ -103,8 +103,7 @@ fn add_symlink(entries: &mut Vec<ImageEntry>, link: &str, target: &str) {
 }
 
 fn add_init_binary(entries: &mut Vec<ImageEntry>) -> Result<()> {
-    let init_path = option_env!("GALDR_INIT_PATH")
-        .unwrap_or("target/x86_64-unknown-linux-gnu/release/galdr-init");
+    let init_path = option_env!("GALDR_INIT_PATH").unwrap_or("target/release/galdr-init");
 
     if Path::new(init_path).exists() {
         add_file(entries, "sbin/galdr-init", Path::new(init_path), 0o755)?;

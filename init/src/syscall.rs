@@ -66,6 +66,67 @@ pub fn close(fd: usize) -> isize {
     ret
 }
 
+pub fn mkdir(path: *const u8, mode: u32) -> isize {
+    let ret: isize;
+    unsafe {
+        asm!(
+            "syscall",
+            in("rax") 83,  // sys_mkdir
+            in("rdi") path,
+            in("rsi") mode,
+            out("rcx") _,
+            out("r11") _,
+            lateout("rax") ret,
+        );
+    }
+    ret
+}
+
+pub fn rmdir(path: *const u8) -> isize {
+    let ret: isize;
+    unsafe {
+        asm!(
+            "syscall",
+            in("rax") 84,  // sys_rmdir
+            in("rdi") path,
+            out("rcx") _,
+            out("r11") _,
+            lateout("rax") ret,
+        );
+    }
+    ret
+}
+
+pub fn chdir(path: *const u8) -> isize {
+    let ret: isize;
+    unsafe {
+        asm!(
+            "syscall",
+            in("rax") 80,  // sys_chdir
+            in("rdi") path,
+            out("rcx") _,
+            out("r11") _,
+            lateout("rax") ret,
+        );
+    }
+    ret
+}
+
+pub fn chroot(path: *const u8) -> isize {
+    let ret: isize;
+    unsafe {
+        asm!(
+            "syscall",
+            in("rax") 161, // sys_chroot
+            in("rdi") path,
+            out("rcx") _,
+            out("r11") _,
+            lateout("rax") ret,
+        );
+    }
+    ret
+}
+
 pub fn mount(source: *const u8, target: *const u8, fstype: *const u8, flags: u64) -> isize {
     let ret: isize;
     unsafe {
@@ -85,14 +146,30 @@ pub fn mount(source: *const u8, target: *const u8, fstype: *const u8, flags: u64
     ret
 }
 
-pub fn mkdir(path: *const u8, mode: u32) -> isize {
+pub fn umount2(target: *const u8, flags: i32) -> isize {
     let ret: isize;
     unsafe {
         asm!(
             "syscall",
-            in("rax") 83,  // sys_mkdir
-            in("rdi") path,
-            in("rsi") mode,
+            in("rax") 166, // sys_umount2
+            in("rdi") target,
+            in("rsi") flags,
+            out("rcx") _,
+            out("r11") _,
+            lateout("rax") ret,
+        );
+    }
+    ret
+}
+
+pub fn pivot_root(new_root: *const u8, put_old: *const u8) -> isize {
+    let ret: isize;
+    unsafe {
+        asm!(
+            "syscall",
+            in("rax") 155, // sys_pivot_root
+            in("rdi") new_root,
+            in("rsi") put_old,
             out("rcx") _,
             out("r11") _,
             lateout("rax") ret,
@@ -123,9 +200,9 @@ pub fn reboot() -> ! {
         asm!(
             "syscall",
             in("rax") 169, // sys_reboot
-            in("rdi") 0xfee1deadu32 as i32,  // LINUX_REBOOT_MAGIC1
-            in("rsi") 672274793u32 as i32,    // LINUX_REBOOT_MAGIC2
-            in("rdx") 0x1234567u32 as i32,    // RB_POWER_OFF
+            in("rdi") 0xfee1deadu32 as i32,
+            in("rsi") 672274793u32 as i32,
+            in("rdx") 0x1234567u32 as i32,
             out("rcx") _,
             out("r11") _,
         );
@@ -133,11 +210,35 @@ pub fn reboot() -> ! {
     loop {}
 }
 
+pub fn signal(sig: i32) -> isize {
+    let ret: isize;
+    unsafe {
+        asm!(
+            "syscall",
+            in("rax") 13,  // sys_rt_sigaction
+            in("rdi") sig,
+            in("rsi") 0,
+            in("rdx") 0,
+            out("rcx") _,
+            out("r11") _,
+            lateout("rax") ret,
+        );
+    }
+    ret
+}
+
 pub const O_RDONLY: i32 = 0;
 
 pub const MS_NOSUID: u64 = 2;
 pub const MS_NODEV: u64 = 4;
 pub const MS_NOEXEC: u64 = 8;
+pub const MNT_DETACH: i32 = 2;
+
+pub const SIGPIPE: i32 = 13;
+pub const SIGCHLD: i32 = 17;
+pub const SIGUSR1: i32 = 10;
+pub const SIGUSR2: i32 = 12;
+pub const SIG_IGN: usize = 1;
 
 static mut FILE_BUF: [u8; 4096] = [0u8; 4096];
 

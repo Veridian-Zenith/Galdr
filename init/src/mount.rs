@@ -1,6 +1,40 @@
 use crate::console;
 use crate::syscall;
 
+pub fn mount_initramfs_vfs() -> Result<(), &'static [u8]> {
+    let ret = syscall::mount(
+        b"proc\0".as_ptr(),
+        b"/proc\0".as_ptr(),
+        b"proc\0".as_ptr(),
+        syscall::MS_NOSUID | syscall::MS_NODEV,
+    );
+    if ret < 0 {
+        console::kprint(b"[galdr] WARNING: Failed to mount /proc\n");
+    }
+
+    let ret = syscall::mount(
+        b"sysfs\0".as_ptr(),
+        b"/sys\0".as_ptr(),
+        b"sysfs\0".as_ptr(),
+        syscall::MS_NOSUID | syscall::MS_NODEV | syscall::MS_NOEXEC,
+    );
+    if ret < 0 {
+        console::kprint(b"[galdr] WARNING: Failed to mount /sys\n");
+    }
+
+    let ret = syscall::mount(
+        b"devtmpfs\0".as_ptr(),
+        b"/dev\0".as_ptr(),
+        b"devtmpfs\0".as_ptr(),
+        syscall::MS_NOSUID | syscall::MS_NOEXEC,
+    );
+    if ret < 0 {
+        console::kprint(b"[galdr] WARNING: Failed to mount /dev\n");
+    }
+
+    Ok(())
+}
+
 pub fn mount_root(dev: &[u8]) -> Result<(), &'static [u8]> {
     console::kprint(b"[galdr] Creating mount points...\n");
 
@@ -32,7 +66,6 @@ pub fn mount_root(dev: &[u8]) -> Result<(), &'static [u8]> {
         try_fallback_mount(&dev_buf)?;
     }
 
-    mount_virtual_filesystems()?;
     Ok(())
 }
 
@@ -52,42 +85,6 @@ fn try_fallback_mount(dev_buf: &[u8; 256]) -> Result<(), &'static [u8]> {
     }
 
     Err(b"Failed to mount root filesystem")
-}
-
-fn mount_virtual_filesystems() -> Result<(), &'static [u8]> {
-    console::kprint(b"[galdr] Mounting virtual filesystems...\n");
-
-    let ret = syscall::mount(
-        b"proc\0".as_ptr(),
-        b"/sysroot/proc\0".as_ptr(),
-        b"proc\0".as_ptr(),
-        syscall::MS_NOSUID | syscall::MS_NODEV | syscall::MS_NOEXEC,
-    );
-    if ret < 0 {
-        console::kprint(b"[galdr] WARNING: Failed to mount /proc\n");
-    }
-
-    let ret = syscall::mount(
-        b"sysfs\0".as_ptr(),
-        b"/sysroot/sys\0".as_ptr(),
-        b"sysfs\0".as_ptr(),
-        syscall::MS_NOSUID | syscall::MS_NODEV | syscall::MS_NOEXEC,
-    );
-    if ret < 0 {
-        console::kprint(b"[galdr] WARNING: Failed to mount /sys\n");
-    }
-
-    let ret = syscall::mount(
-        b"devtmpfs\0".as_ptr(),
-        b"/sysroot/dev\0".as_ptr(),
-        b"devtmpfs\0".as_ptr(),
-        syscall::MS_NOSUID | syscall::MS_NOEXEC,
-    );
-    if ret < 0 {
-        console::kprint(b"[galdr] WARNING: Failed to mount /dev\n");
-    }
-
-    Ok(())
 }
 
 fn ensure_dir(path: &[u8]) {
