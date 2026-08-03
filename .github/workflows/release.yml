@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --workspace
+
+      - name: Package
+        run: |
+          tar -czf galdr-${{ github.ref_name }}-x86_64.tar.gz \
+            -C target/release galdr galdr-init
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: galdr-${{ github.ref_name }}-x86_64.tar.gz
+          generate_release_notes: true
