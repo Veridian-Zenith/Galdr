@@ -1,0 +1,17 @@
+[package]
+name = "galdr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Galdr initramfs generator"
+
+[[bin]]
+name = "galdr"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4.0", features = ["derive"] }
+chrono = "0.4"

@@ -1,0 +1,32 @@
+# Galdr - Initramfs Configuration
+# https://github.com/Veridian-Zenith/Galdr
+
+# Kernel version to build for ("auto" = running kernel)
+kernel = "auto"
+
+# Compression: zstd (fast), gzip (safe), xz (small), lz4 (fastest), none
+compress = "zstd"
+
+# Output path
+output = "/boot/initramfs-linux.img"
+
+# Root device detection: "auto" or explicit device (e.g., "/dev/nvme0n1p2")
+root = "auto"
+
+# Seconds to wait for root device before fallback
+timeout = 10
+
+# What to do when boot fails: "shell" or "reboot"
+fallback = "shell"
+
+# LUKS encryption support (optional module)
+luks = false
+
+# Extra kernel modules to include (empty = auto-detect from running system)
+# modules = ["ext4", "nvme", "usbcore"]
+
+# Extra firmware files to include
+# firmware = ["/lib/firmware/amdgpu/ucode.bin"]
+
+# Extra files to pack into initramfs
+# extra_files = ["/etc/crypttab"]
