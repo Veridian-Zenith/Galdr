@@ -31,8 +31,8 @@ echo "[galdr-test] Booting QEMU (Ctrl-A X to quit)..."
 exec qemu-system-x86_64 \
     -kernel "$KERNEL" \
     -initrd "$INITRD_IMG" \
-    -append "root=/dev/sda rw console=ttyS0,115200n8 earlyprintk=serial" \
-    -drive "file=$ROOTFS_IMG,format=raw" \
+    -append "root=/dev/vda rw console=ttyS0,115200n8 earlyprintk=serial" \
+    -drive "file=$ROOTFS_IMG,format=raw,if=virtio" \
     -m 512M \
     -nographic \
     -accel kvm \
