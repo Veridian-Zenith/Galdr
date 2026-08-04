@@ -2,6 +2,7 @@
 #![no_main]
 
 mod console;
+mod modules;
 mod mount;
 mod root;
 mod syscall;
@@ -41,6 +42,8 @@ fn setup_signals() {
 fn run() -> Result<(), &'static [u8]> {
     console::kprint(b"[galdr] Mounting initramfs filesystems...\n");
     mount::mount_initramfs_vfs()?;
+
+    modules::load_modules();
 
     let root_dev = detect_root()?;
     console::kprint(b"[galdr] Root device: ");
