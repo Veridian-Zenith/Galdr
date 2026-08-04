@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct Config {
     #[serde(default = "default_kernel")]

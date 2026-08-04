@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![allow(clippy::manual_c_str_literals)]
 
 mod console;
 mod modules;

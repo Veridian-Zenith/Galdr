@@ -46,7 +46,7 @@ pub fn build(cfg: &Config, detected: &DetectedSystem) -> Result<Image> {
     for module_path in &detected.modules {
         let relative = module_path
             .strip_prefix("/lib/modules/")
-            .unwrap_or(&module_path);
+            .unwrap_or(module_path);
         let dest = format!("lib/modules/{}", relative.display());
         add_file(&mut entries, &dest, module_path, 0o644)?;
     }
@@ -54,7 +54,7 @@ pub fn build(cfg: &Config, detected: &DetectedSystem) -> Result<Image> {
     for firmware_path in &detected.firmware {
         let relative = firmware_path
             .strip_prefix("/lib/firmware/")
-            .unwrap_or(&firmware_path);
+            .unwrap_or(firmware_path);
         let dest = format!("lib/firmware/{}", relative.display());
         add_file(&mut entries, &dest, firmware_path, 0o644)?;
     }
@@ -63,7 +63,7 @@ pub fn build(cfg: &Config, detected: &DetectedSystem) -> Result<Image> {
         if extra.exists() {
             let dest = extra
                 .strip_prefix("/")
-                .unwrap_or(&extra)
+                .unwrap_or(extra)
                 .to_string_lossy()
                 .to_string();
             add_file(&mut entries, &dest, extra, 0o644)?;

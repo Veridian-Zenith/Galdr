@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::syscall;
 
 const STDOUT: usize = 1;

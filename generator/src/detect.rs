@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 
+#[allow(dead_code)]
 pub struct DetectedSystem {
     pub root_device: String,
     pub root_fstype: String,
@@ -92,10 +93,10 @@ fn discover_modules_recursive(dir: &Path, modules: &mut Vec<PathBuf>) -> Result<
 
         if path.is_dir() {
             discover_modules_recursive(&path, modules)?;
-        } else if let Some(ext) = path.extension() {
-            if ext == "ko" || ext == "zst" || ext == "xz" {
-                modules.push(path);
-            }
+        } else if let Some(ext) = path.extension()
+            && (ext == "ko" || ext == "zst" || ext == "xz")
+        {
+            modules.push(path);
         }
     }
     Ok(())

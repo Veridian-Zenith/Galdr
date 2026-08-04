@@ -207,7 +207,12 @@ pub fn reboot() -> ! {
             out("r11") _,
         );
     }
-    loop {}
+    // Wait for reboot — hlt saves power vs busy-loop
+    unsafe {
+        loop {
+            core::arch::asm!("cli; hlt");
+        }
+    }
 }
 
 pub fn signal(sig: i32) -> isize {
@@ -238,6 +243,7 @@ pub const SIGPIPE: i32 = 13;
 pub const SIGCHLD: i32 = 17;
 pub const SIGUSR1: i32 = 10;
 pub const SIGUSR2: i32 = 12;
+#[allow(dead_code)]
 pub const SIG_IGN: usize = 1;
 
 static mut FILE_BUF: [u8; 4096] = [0u8; 4096];
