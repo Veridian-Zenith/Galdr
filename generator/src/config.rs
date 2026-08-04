@@ -106,6 +106,7 @@ fn detect_running_kernel() -> String {
             p.file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
+                .trim()
                 .to_string()
         })
         .unwrap_or_else(|_| "latest".to_string())

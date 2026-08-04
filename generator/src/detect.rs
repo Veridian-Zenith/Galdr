@@ -66,32 +66,58 @@ fn discover_modules(base: &Path, explicit: &[String]) -> Result<Vec<PathBuf>> {
 
     if !explicit.is_empty() {
         for name in explicit {
-            let path = base.join(format!("{}.ko.zst", name));
-            if path.exists() {
-                modules.push(path);
-            } else {
-                let path = base.join(format!("{}.ko", name));
-                if path.exists() {
-                    modules.push(path);
-                } else {
-                    eprintln!("[galdr] WARNING: Module '{}' not found", name);
-                }
+            let found = find_module_recursive(base, name);
+            match found {
+                Some(path) => modules.push(path),
+                None => eprintln!("[galdr] WARNING: Module '{}' not found", name),
             }
         }
         return Ok(modules);
     }
 
-    let kernel = base.join("kernel");
-    if kernel.exists() {
-        discover_modules_recursive(&kernel, &mut modules)?;
+    // Auto-detect: only bundle currently loaded modules + DKMS modules
+    let loaded = loaded_module_names();
+    for name in &loaded {
+        if let Some(path) = find_module_recursive(base, name) {
+            modules.push(path);
+        }
     }
 
-    let extra = base.join("extra");
-    if extra.exists() {
-        discover_modules_recursive(&extra, &mut modules)?;
+    // Always include DKMS modules — they're system-specific
+    let dkms = base.join("updates/dkms");
+    if dkms.exists() {
+        discover_modules_recursive(&dkms, &mut modules)?;
     }
 
     Ok(modules)
+}
+
+fn loaded_module_names() -> Vec<String> {
+    let Ok(data) = std::fs::read_to_string("/proc/modules") else {
+        return Vec::new();
+    };
+    data.lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(|name| name.to_string())
+        .collect()
+}
+
+fn find_module_recursive(dir: &Path, name: &str) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(dir).ok()? {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_module_recursive(&path, name) {
+                return Some(found);
+            }
+        } else if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            let stem = stem.strip_suffix(".ko").unwrap_or(stem);
+            if stem == name {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 fn discover_modules_recursive(dir: &Path, modules: &mut Vec<PathBuf>) -> Result<()> {
@@ -124,36 +150,5 @@ fn discover_firmware(explicit: &[PathBuf]) -> Result<Vec<PathBuf>> {
         return Ok(firmware);
     }
 
-    let fw_dir = Path::new("/lib/firmware");
-    if fw_dir.exists() {
-        discover_firmware_recursive(fw_dir, &mut firmware, 3)?;
-    }
-
     Ok(firmware)
-}
-
-fn discover_firmware_recursive(
-    dir: &Path,
-    firmware: &mut Vec<PathBuf>,
-    depth: usize,
-) -> Result<()> {
-    if depth == 0 {
-        return Ok(());
-    }
-
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_dir() {
-            let name = entry.file_name();
-            if name == "." || name == ".." || name == "amdgpu" || name == "nvidia" {
-                continue;
-            }
-            discover_firmware_recursive(&path, firmware, depth - 1)?;
-        } else {
-            firmware.push(path);
-        }
-    }
-    Ok(())
 }

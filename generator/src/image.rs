@@ -19,10 +19,6 @@ enum ImageEntry {
         content: Vec<u8>,
         mode: u32,
     },
-    Symlink {
-        link: String,
-        target: String,
-    },
 }
 
 pub fn build(cfg: &Config, detected: &DetectedSystem) -> Result<Image> {
@@ -34,14 +30,7 @@ pub fn build(cfg: &Config, detected: &DetectedSystem) -> Result<Image> {
     add_directory(&mut entries, "run", 0o755);
     add_directory(&mut entries, "tmp", 0o1777);
     add_directory(&mut entries, "sysroot", 0o755);
-
-    add_symlink(&mut entries, "bin", "/usr/bin");
-    add_symlink(&mut entries, "sbin", "/usr/sbin");
-    add_symlink(&mut entries, "lib", "/usr/lib");
-
-    add_directory(&mut entries, "usr/bin", 0o755);
-    add_directory(&mut entries, "usr/sbin", 0o755);
-    add_directory(&mut entries, "usr/lib", 0o755);
+    add_directory(&mut entries, "sbin", 0o755);
 
     for module_path in &detected.modules {
         let relative = module_path
@@ -95,19 +84,14 @@ fn add_file(entries: &mut Vec<ImageEntry>, dest: &str, source: &Path, mode: u32)
     Ok(())
 }
 
-fn add_symlink(entries: &mut Vec<ImageEntry>, link: &str, target: &str) {
-    entries.push(ImageEntry::Symlink {
-        link: link.to_string(),
-        target: target.to_string(),
-    });
-}
-
 fn add_init_binary(entries: &mut Vec<ImageEntry>) -> Result<()> {
     let init_path = option_env!("GALDR_INIT_PATH").unwrap_or("target/release/galdr-init");
 
     if Path::new(init_path).exists() {
+        // Kernel expects /init at root of initramfs
+        add_file(entries, "init", Path::new(init_path), 0o755)?;
+        // Also at /sbin/init for our chroot fallback path
         add_file(entries, "sbin/init", Path::new(init_path), 0o755)?;
-        add_symlink(entries, "sbin/galdr-init", "/sbin/init");
     } else {
         eprintln!("[galdr] WARNING: Init binary not found at {}", init_path);
         eprintln!("[galdr] Build it first: cargo build --release -p galdr-init");
@@ -128,9 +112,6 @@ pub fn write_cpio(image: &Image, writer: &mut impl Write) -> Result<()> {
                 mode,
             } => {
                 write_cpio_entry(writer, path, Some(content), *mode, 0o100644)?;
-            }
-            ImageEntry::Symlink { link, target } => {
-                write_cpio_symlink(writer, link, target)?;
             }
         }
     }
@@ -190,48 +171,6 @@ fn write_cpio_entry(
     Ok(())
 }
 
-fn write_cpio_symlink(writer: &mut impl Write, link: &str, target: &str) -> Result<()> {
-    let link_bytes = link.as_bytes();
-    let link_len = link_bytes.len() + 1;
-    let target_bytes = target.as_bytes();
-
-    let header = CpioHeader {
-        magic: 0x070701,
-        ino: 0,
-        mode: 0o120777,
-        uid: 0,
-        gid: 0,
-        nlink: 1,
-        mtime: 0,
-        filesize: target_bytes.len() as u32,
-        devmajor: 0,
-        devminor: 0,
-        rdevmajor: 0,
-        rdevminor: 0,
-        namesize: link_len as u32,
-        check: 0,
-    };
-
-    let mut buf = [0u8; 110];
-    write_cpio_header_bytes(&mut buf, &header);
-    writer.write_all(&buf)?;
-    writer.write_all(link_bytes)?;
-    writer.write_all(b"\0")?;
-
-    let header_pad = (110 + link_len) % 4;
-    if header_pad > 0 {
-        writer.write_all(&vec![0u8; 4 - header_pad])?;
-    }
-
-    writer.write_all(target_bytes)?;
-    let data_pad = target_bytes.len() % 4;
-    if data_pad > 0 {
-        writer.write_all(&vec![0u8; 4 - data_pad])?;
-    }
-
-    Ok(())
-}
-
 fn write_cpio_end(writer: &mut impl Write) -> Result<()> {
     let trailer = b"TRAILER!!!\0";
     let header = CpioHeader {
@@ -282,8 +221,11 @@ struct CpioHeader {
 }
 
 fn write_cpio_header_bytes(buf: &mut [u8; 110], h: &CpioHeader) {
+    // newc magic is 6 bytes: "070701"
+    let magic_str = format!("{:06x}", h.magic);
+    buf[..6].copy_from_slice(magic_str.as_bytes());
+
     let fields = [
-        h.magic,
         h.ino,
         h.mode,
         h.uid,
@@ -301,7 +243,7 @@ fn write_cpio_header_bytes(buf: &mut [u8; 110], h: &CpioHeader) {
 
     for (i, &val) in fields.iter().enumerate() {
         let hex = format!("{:08x}", val);
-        let start = i * 8;
+        let start = 6 + i * 8;
         buf[start..start + 8].copy_from_slice(hex.as_bytes());
     }
 }
