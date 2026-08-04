@@ -10,7 +10,7 @@ rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR/initramfs" "$WORKDIR/rootfs/sbin"
 
 echo "[galdr-test] Building init (baseline x86-64 for QEMU)..."
-env -u RUSTFLAGS cargo build --release -p galdr-init
+env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo build --release -p galdr-init
 
 echo "[galdr-test] Packing initramfs..."
 cp target/release/galdr-init "$WORKDIR/initramfs/init"

@@ -1,25 +1,20 @@
 use crate::console;
 use crate::syscall;
 
+const MAX_MODULES: usize = 32;
+const MAX_NAME: usize = 64;
+
 pub fn load_modules() {
     console::kprint(b"[galdr] Loading kernel modules...\n");
 
-    let mods: [&[u8]; 7] = [
-        b"virtio",
-        b"virtio_pci",
-        b"virtio_ring",
-        b"virtio_blk",
-        b"ata_piix",
-        b"ahci",
-        b"ext4",
-    ];
-
     let release = read_kernel_release();
+    let modules = parse_modules_from_cmdline();
 
-    for &name in &mods {
+    for i in 0..modules.len {
+        let name = &modules.names[i][..modules.lengths[i] as usize];
         let mut loaded = false;
-        let exts: [&[u8]; 3] = [b".ko.zst", b".ko.xz", b".ko"];
-        for &ext in &exts {
+
+        for ext in [".ko.zst", ".ko.xz", ".ko"] {
             if load_one(release, name, ext) {
                 loaded = true;
                 break;
@@ -29,11 +24,77 @@ pub fn load_modules() {
             console::kprint(b"[galdr]   + ");
             console::kprint(name);
             console::kprint(b"\n");
+        } else {
+            console::kprint(b"[galdr]   - ");
+            console::kprint(name);
+            console::kprint(b" (not found)\n");
         }
     }
 }
 
-fn load_one(release: &[u8], name: &[u8], ext: &[u8]) -> bool {
+struct ModuleList {
+    names: [[u8; MAX_NAME]; MAX_MODULES],
+    lengths: [u16; MAX_MODULES],
+    len: usize,
+}
+
+impl ModuleList {
+    const fn new() -> Self {
+        Self {
+            names: [[0u8; MAX_NAME]; MAX_MODULES],
+            lengths: [0u16; MAX_MODULES],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, name: &[u8]) {
+        if self.len >= MAX_MODULES || name.is_empty() {
+            return;
+        }
+        let copy_len = if name.len() < MAX_NAME {
+            name.len()
+        } else {
+            MAX_NAME
+        };
+        self.names[self.len][..copy_len].copy_from_slice(&name[..copy_len]);
+        self.lengths[self.len] = copy_len as u16;
+        self.len += 1;
+    }
+}
+
+fn parse_modules_from_cmdline() -> ModuleList {
+    let mut list = ModuleList::new();
+
+    if let Ok(cmdline) = syscall::read_file(b"/proc/cmdline\0") {
+        for token in cmdline.split(|&b| b == b' ') {
+            if token.starts_with(b"galdr.modules=") {
+                let rest = &token[14..];
+                for module in rest.split(|&b| b == b',') {
+                    if !module.is_empty() {
+                        list.push(module);
+                    }
+                }
+                return list;
+            }
+        }
+    }
+
+    for &m in &[
+        b"virtio" as &[u8],
+        b"virtio_pci",
+        b"virtio_ring",
+        b"virtio_blk",
+        b"ata_piix",
+        b"ahci",
+        b"ext4",
+    ] {
+        list.push(m);
+    }
+
+    list
+}
+
+fn load_one(release: &[u8], name: &[u8], ext: &str) -> bool {
     let mut path = [0u8; 192];
     let mut off = 0;
 
@@ -50,11 +111,11 @@ fn load_one(release: &[u8], name: &[u8], ext: &[u8]) -> bool {
     path[off..off + name.len()].copy_from_slice(name);
     off += name.len();
 
-    path[off..off + ext.len()].copy_from_slice(ext);
-    off += ext.len();
+    let ext_bytes = ext.as_bytes();
+    path[off..off + ext_bytes.len()].copy_from_slice(ext_bytes);
+    off += ext_bytes.len();
 
     path[off] = 0;
-    off += 1;
 
     let fd = syscall::open(path.as_ptr(), 0);
     if fd < 0 {
@@ -71,7 +132,7 @@ fn finit_module(fd: usize, params: *const u8, flags: u32) -> isize {
     unsafe {
         core::arch::asm!(
             "syscall",
-            in("rax") 313u64, // sys_finit_module
+            in("rax") 313u64,
             in("rdi") fd,
             in("rsi") params,
             in("rdx") flags,

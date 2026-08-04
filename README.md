@@ -13,13 +13,23 @@ Galdr does one thing: build an initramfs image that boots your system. No hooks,
 - **zstd compression** — Fast decompression (~500MB/s) for quick boot times
 - **Fallback handling** — Tries fallback devices, drops to shell on failure
 - **LUKS support** — Optional encryption module
-- **Minimal init** — ~200 line `#![no_std]` init binary, no libc dependency
+- **Minimal init** — ~300 line `#![no_std]` init binary, no libc dependency
+
+## Building
+
+The init binary targets baseline x86-64 (no AVX/SSE4) so it boots on any machine.
+If your shell sets `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` (e.g. `-C target-cpu=native`),
+you must clear them for the init build:
+
+```bash
+env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo build --release
+```
 
 ## Quick Start
 
 ```bash
 # Build
-cargo build --release
+env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo build --release
 
 # Generate initramfs (reads /etc/galdr/galdr.toml)
 sudo ./target/release/galdr
@@ -27,6 +37,15 @@ sudo ./target/release/galdr
 # Or with custom config
 sudo ./target/release/galdr --config /etc/galdr/galdr.toml --verbose
 ```
+
+## QEMU Testing
+
+```bash
+./scripts/qemu-test.sh
+```
+
+Uses virtio (built-in, no module loading needed). Boots, detects root, mounts ext4,
+chroots, and execs `/sbin/init`.
 
 ## Configuration
 
@@ -43,6 +62,17 @@ luks = false
 
 See `config/galdr.toml` for all options.
 
+## Kernel Modules
+
+The init binary loads modules automatically from `/lib/modules/<release>/`.
+Override via kernel cmdline:
+
+```
+galdr.modules=ahci,ext4,btrfs
+```
+
+Default modules: virtio, virtio_pci, virtio_ring, virtio_blk, ata_piix, ahci, ext4.
+
 ## Project Structure
 
 ```
@@ -50,12 +80,12 @@ Galdr/
   init/           # Init binary (#![no_std], runs in initramfs)
   generator/      # Generator tool (full Rust, runs on host)
   config/         # Default config
+  scripts/        # QEMU test script
 ```
 
 ## Requirements
 
 - Rust 2024 edition
-- zstd (for compression)
 - Root access (to read /proc, /lib/modules, /lib/firmware)
 
 ## License
