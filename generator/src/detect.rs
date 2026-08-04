@@ -16,14 +16,22 @@ pub fn probe_system(cfg: &Config) -> Result<DetectedSystem> {
     let kernel_version = cfg.kernel.clone();
     let modules_base = PathBuf::from(format!("/lib/modules/{}", kernel_version));
 
-    if !modules_base.exists() {
-        anyhow::bail!(
-            "Kernel modules not found at {}. Check your kernel version.",
-            modules_base.display()
-        );
-    }
-
-    let mut modules = discover_modules(&modules_base, &cfg.modules)?;
+    let mut modules = if modules_base.exists() {
+        discover_modules(&modules_base, &cfg.modules)?
+    } else {
+        if cfg.modules.is_empty() {
+            eprintln!(
+                "[galdr] WARNING: No kernel modules at {} — initramfs will rely on built-in drivers",
+                modules_base.display()
+            );
+        } else {
+            anyhow::bail!(
+                "Kernel modules not found at {}. Check your kernel version.",
+                modules_base.display()
+            );
+        }
+        Vec::new()
+    };
     let mut firmware = discover_firmware(&cfg.firmware)?;
 
     modules.sort();
