@@ -53,7 +53,32 @@ fn run() -> Result<(), &'static [u8]> {
 
     console::kprint(b"[galdr] Mounting root filesystem...\n");
     syscall::mkdir(b"/old_root\0".as_ptr(), 0o755);
-    mount::mount_root(root_dev)?;
+
+    if mount::mount_root(root_dev).is_err() {
+        console::kprint(b"[galdr] Primary root failed, trying fallback devices...\n");
+        let fallbacks: [&[u8]; 7] = [
+            b"/dev/vda",
+            b"/dev/vdb",
+            b"/dev/sda",
+            b"/dev/sdb",
+            b"/dev/nvme0n1p2",
+            b"/dev/nvme1n1p2",
+            b"/dev/mmcblk0p2",
+        ];
+        let mut mounted = false;
+        for fb in &fallbacks {
+            console::kprint(b"[galdr]   Trying ");
+            console::kprint(fb);
+            console::kprint(b"...\n");
+            if mount::mount_root(fb).is_ok() {
+                mounted = true;
+                break;
+            }
+        }
+        if !mounted {
+            return Err(b"No bootable root found");
+        }
+    }
 
     Ok(())
 }
