@@ -2,41 +2,38 @@
 set -euo pipefail
 
 WORKDIR="/tmp/galdr-test"
-ROOTFS_SIZE=256
 ROOTFS_IMG="$WORKDIR/rootfs.img"
 INITRD_IMG="$WORKDIR/initrd.img"
 KERNEL="/boot/vmlinuz-linux-cachyos-eevdf-lto"
 
 rm -rf "$WORKDIR"
-mkdir -p "$WORKDIR/initramfs" "$WORKDIR/rootfs"
+mkdir -p "$WORKDIR/initramfs" "$WORKDIR/rootfs/sbin"
 
-echo "[galdr-test] Building..."
-cargo build --release --workspace
+echo "[galdr-test] Building init (baseline x86-64 for QEMU)..."
+env -u RUSTFLAGS cargo build --release -p galdr-init
 
 echo "[galdr-test] Packing initramfs..."
 cp target/release/galdr-init "$WORKDIR/initramfs/init"
 chmod +x "$WORKDIR/initramfs/init"
 (cd "$WORKDIR/initramfs" && find . -print0 | cpio -o -H newc --null | gzip) > "$INITRD_IMG"
-echo "[galdr-test] initramdund $(wc -c < "$INITRD_IMG") bytes"
 
-echo "[galdr-test] Creating rootfs..."
-dd if=/dev/zero of="$ROOTFS_IMG" bs=1M count=$ROOTFS_SIZE status=none
-mkfs.ext4 -q -F -L "galdr-test" "$ROOTFS_IMG"
-sudo mount "$ROOTFS_IMG" "$WORKDIR/rootfs"
-sudo mkdir -p "$WORKDIR/rootfs/sbin"
-echo '#!/bin/sh
+echo "[galdr-test] Creating rootfs (no sudo needed)..."
+cat > "$WORKDIR/rootfs/sbin/init" << 'INIT'
+#!/bin/sh
 echo "=== Galdr test rootfs reached ==="
 echo "Boot successful. Halting."
-poweroff -f' | sudo tee "$WORKDIR/rootfs/sbin/init" > /dev/null
-sudo chmod +x "$WORKDIR/rootfs/sbin/init"
-sudo umount "$WORKDIR/rootfs"
+poweroff -f
+INIT
+chmod +x "$WORKDIR/rootfs/sbin/init"
+mke2fs -t ext4 -b 4096 -d "$WORKDIR/rootfs" -L "galdr-test" "$ROOTFS_IMG" 256M
 
 echo "[galdr-test] Booting QEMU (Ctrl-A X to quit)..."
-qemu-system-x86_64 \
+exec qemu-system-x86_64 \
     -kernel "$KERNEL" \
     -initrd "$INITRD_IMG" \
-    -append "root=/dev/sda rw console=ttyS0" \
+    -append "root=/dev/sda rw console=ttyS0,115200n8 earlyprintk=serial" \
     -drive "file=$ROOTFS_IMG,format=raw" \
     -m 512M \
     -nographic \
+    -accel kvm \
     -no-reboot

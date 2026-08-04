@@ -2,6 +2,11 @@ use crate::console;
 use crate::syscall;
 
 pub fn mount_initramfs_vfs() -> Result<(), &'static [u8]> {
+    syscall::mkdir(b"/proc\0".as_ptr(), 0o555);
+    syscall::mkdir(b"/sys\0".as_ptr(), 0o555);
+    syscall::mkdir(b"/dev\0".as_ptr(), 0o755);
+    syscall::mkdir(b"/run\0".as_ptr(), 0o755);
+
     let ret = syscall::mount(
         b"proc\0".as_ptr(),
         b"/proc\0".as_ptr(),
