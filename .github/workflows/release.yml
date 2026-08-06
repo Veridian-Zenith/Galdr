@@ -21,7 +21,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release --workspace
+        run: env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo build --release --workspace
 
       - name: Package
         run: |

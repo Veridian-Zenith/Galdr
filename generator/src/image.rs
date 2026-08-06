@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use std::io::Write;
+use std::os::linux::fs::MetadataExt;
 use std::path::Path;
 
 use crate::config::Config;
-use crate::detect::DetectedSystem;
+use crate::hooks::{BuildContext, Hookpoint};
 
 pub struct Image {
-    entries: Vec<ImageEntry>,
+    main_entries: Vec<ImageEntry>,
 }
 
 enum ImageEntry {
@@ -21,87 +22,185 @@ enum ImageEntry {
     },
 }
 
-pub fn build(cfg: &Config, detected: &DetectedSystem) -> Result<Image> {
-    let mut entries = Vec::new();
+pub fn build(cfg: &Config) -> Result<Image> {
+    let mut ctx = BuildContext::new(
+        std::env::temp_dir().join("galdr-buildroot"),
+        cfg.kernel.clone(),
+    );
 
-    add_directory(&mut entries, "proc", 0o555);
-    add_directory(&mut entries, "sys", 0o555);
-    add_directory(&mut entries, "dev", 0o755);
-    add_directory(&mut entries, "run", 0o755);
-    add_directory(&mut entries, "tmp", 0o1777);
-    add_directory(&mut entries, "sysroot", 0o755);
-    add_directory(&mut entries, "sbin", 0o755);
+    // Clean and recreate buildroot
+    let _ = std::fs::remove_dir_all(&ctx.buildroot);
+    std::fs::create_dir_all(&ctx.buildroot)?;
 
-    for module_path in &detected.modules {
-        let relative = module_path
-            .strip_prefix("/lib/modules/")
-            .unwrap_or(module_path);
-        let dest = format!("lib/modules/{}", relative.display());
-        add_file(&mut entries, &dest, module_path, 0o644)?;
-    }
+    // Run hooks in order
+    use crate::hooks::resolve_hook;
+    for hook_name in &cfg.hooks {
+        match resolve_hook(hook_name) {
+            Some(hook) => {
+                eprintln!("[galdr] Running hook: {}", hook_name);
+                let output = hook
+                    .build(&mut ctx)
+                    .with_context(|| format!("Hook '{}' failed", hook_name))?;
 
-    for firmware_path in &detected.firmware {
-        let relative = firmware_path
-            .strip_prefix("/lib/firmware/")
-            .unwrap_or(firmware_path);
-        let dest = format!("lib/firmware/{}", relative.display());
-        add_file(&mut entries, &dest, firmware_path, 0o644)?;
-    }
-
-    for extra in &cfg.extra_files {
-        if extra.exists() {
-            let dest = extra
-                .strip_prefix("/")
-                .unwrap_or(extra)
-                .to_string_lossy()
-                .to_string();
-            add_file(&mut entries, &dest, extra, 0o644)?;
+                // Register runtime hooks
+                if !output.runtime.is_empty() {
+                    ctx.add_runtime_hook(hook_name, &output.runtime);
+                }
+            }
+            None => {
+                eprintln!("[galdr] WARNING: Unknown hook '{}' — skipping", hook_name);
+            }
         }
     }
 
-    add_init_binary(&mut entries)?;
+    // Add explicit modules (from config)
+    for m in &cfg.modules {
+        ctx.add_module(m, m.ends_with('?'))?;
+    }
 
-    Ok(Image { entries })
+    // Add explicit binaries
+    for b in &cfg.binaries {
+        if b.exists() {
+            ctx.add_binary(b)?;
+        }
+    }
+
+    // Add explicit files
+    for f in &cfg.files {
+        if f.exists() {
+            let rel = f.strip_prefix("/").unwrap_or(f);
+            ctx.add_file(&rel.to_string_lossy(), f, 0o644)?;
+        }
+    }
+
+    // Add firmware
+    for fw in &cfg.firmware {
+        if fw.exists() {
+            let rel = fw.strip_prefix("/lib/firmware/").unwrap_or(fw);
+            let dest = format!("lib/firmware/{}", rel.display());
+            ctx.add_file(&dest, fw, 0o644)?;
+        }
+    }
+
+    // Write config for init to read
+    write_init_config(&mut ctx, cfg)?;
+
+    // Write module list for init
+    write_module_list(&mut ctx)?;
+
+    // Build image from buildroot
+    let image = image_from_buildroot(&ctx)?;
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&ctx.buildroot);
+
+    Ok(image)
 }
 
-fn add_directory(entries: &mut Vec<ImageEntry>, path: &str, mode: u32) {
-    entries.push(ImageEntry::Directory {
-        path: path.to_string(),
-        mode,
-    });
-}
+fn write_init_config(ctx: &mut BuildContext, cfg: &Config) -> Result<()> {
+    let mut config = String::new();
 
-fn add_file(entries: &mut Vec<ImageEntry>, dest: &str, source: &Path, mode: u32) -> Result<()> {
-    let content =
-        std::fs::read(source).with_context(|| format!("Failed to read {}", source.display()))?;
+    // Hook lists by phase
+    let early: Vec<&str> = ctx
+        .runtime_hooks
+        .iter()
+        .filter(|(p, _)| *p == Hookpoint::Early)
+        .map(|(_, n)| n.as_str())
+        .collect();
+    let normal: Vec<&str> = ctx
+        .runtime_hooks
+        .iter()
+        .filter(|(p, _)| *p == Hookpoint::Normal)
+        .map(|(_, n)| n.as_str())
+        .collect();
+    let late: Vec<&str> = ctx
+        .runtime_hooks
+        .iter()
+        .filter(|(p, _)| *p == Hookpoint::Late)
+        .map(|(_, n)| n.as_str())
+        .collect();
+    let cleanup: Vec<&str> = ctx
+        .runtime_hooks
+        .iter()
+        .filter(|(p, _)| *p == Hookpoint::Cleanup)
+        .map(|(_, n)| n.as_str())
+        .collect();
 
-    entries.push(ImageEntry::File {
-        path: dest.to_string(),
-        content,
-        mode,
-    });
+    config.push_str(&format!("EARLYHOOKS=\"{}\"\n", early.join(" ")));
+    config.push_str(&format!("HOOKS=\"{}\"\n", normal.join(" ")));
+    config.push_str(&format!("LATEHOOKS=\"{}\"\n", late.join(" ")));
+    config.push_str(&format!("CLEANUPHOOKS=\"{}\"\n", cleanup.join(" ")));
+    config.push_str(&format!("MODULES=\"{}\"\n", ctx.ordered_modules.join(" ")));
+    config.push_str(&format!("ROOT=\"{}\"\n", cfg.root));
+    config.push_str(&format!("TIMEOUT={}\n", cfg.timeout));
+    config.push_str(&format!("FALLBACK=\"{}\"\n", cfg.fallback));
 
+    // Early modules
+    config.push_str(&format!(
+        "EARLYMODULES=\"{}\"\n",
+        cfg.early_modules.join(" ")
+    ));
+
+    // Runtime hook script paths
+    for (_, name) in &ctx.runtime_hooks {
+        let hook_path = format!("hooks/{}", name);
+        if ctx.buildroot.join(&hook_path).exists() {
+            config.push_str(&format!(
+                "RUNHOOK_{}=\"/{}\"\n",
+                name.to_uppercase(),
+                hook_path
+            ));
+        }
+    }
+
+    ctx.add_bytes("galdr/config", config.as_bytes(), 0o644)?;
     Ok(())
 }
 
-fn add_init_binary(entries: &mut Vec<ImageEntry>) -> Result<()> {
-    let init_path = option_env!("GALDR_INIT_PATH").unwrap_or("target/release/galdr-init");
+fn write_module_list(ctx: &mut BuildContext) -> Result<()> {
+    let module_list = ctx.ordered_modules.join("\n");
+    ctx.add_bytes("galdr/modules", module_list.as_bytes(), 0o644)?;
+    Ok(())
+}
 
-    if Path::new(init_path).exists() {
-        // Kernel expects /init at root of initramfs
-        add_file(entries, "init", Path::new(init_path), 0o755)?;
-        // Also at /sbin/init for our chroot fallback path
-        add_file(entries, "sbin/init", Path::new(init_path), 0o755)?;
-    } else {
-        eprintln!("[galdr] WARNING: Init binary not found at {}", init_path);
-        eprintln!("[galdr] Build it first: cargo build --release -p galdr-init");
+fn image_from_buildroot(ctx: &BuildContext) -> Result<Image> {
+    let mut main = Vec::new();
+
+    collect_entries(&ctx.buildroot, &ctx.buildroot, &mut main)?;
+
+    Ok(Image { main_entries: main })
+}
+
+fn collect_entries(root: &Path, base: &Path, entries: &mut Vec<ImageEntry>) -> Result<()> {
+    for entry in std::fs::read_dir(base)? {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        let rel_str = relative.to_string_lossy().to_string();
+
+        if path.is_dir() {
+            let meta = std::fs::metadata(&path)?;
+            entries.push(ImageEntry::Directory {
+                path: rel_str,
+                mode: meta.st_mode() & 0o777,
+            });
+            collect_entries(root, &path, entries)?;
+        } else if path.is_file() {
+            let meta = std::fs::metadata(&path)?;
+            let content = std::fs::read(&path)?;
+            entries.push(ImageEntry::File {
+                path: rel_str,
+                content,
+                mode: meta.st_mode() & 0o777,
+            });
+        }
     }
-
     Ok(())
 }
 
 pub fn write_cpio(image: &Image, writer: &mut impl Write) -> Result<()> {
-    for entry in &image.entries {
+    // Main CPIO
+    for entry in &image.main_entries {
         match entry {
             ImageEntry::Directory { path, mode } => {
                 write_cpio_entry(writer, path, None, *mode, 0o040755)?;
@@ -117,7 +216,6 @@ pub fn write_cpio(image: &Image, writer: &mut impl Write) -> Result<()> {
     }
 
     write_cpio_end(writer)?;
-
     Ok(())
 }
 
@@ -221,7 +319,6 @@ struct CpioHeader {
 }
 
 fn write_cpio_header_bytes(buf: &mut [u8; 110], h: &CpioHeader) {
-    // newc magic is 6 bytes: "070701"
     let magic_str = format!("{:06x}", h.magic);
     buf[..6].copy_from_slice(magic_str.as_bytes());
 

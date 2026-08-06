@@ -1,26 +1,31 @@
+use crate::CFG;
 use crate::console;
 use crate::syscall;
 
-const MAX_MODULES: usize = 32;
-const MAX_NAME: usize = 64;
-
-pub fn load_modules() {
-    console::kprint(b"[galdr] Loading kernel modules...\n");
-
+/// Load modules from the embedded config (written by generator).
+pub fn load_modules_from_config() {
     let release = read_kernel_release();
-    let modules = parse_modules_from_cmdline();
+    console::kprint(b"[galdr]   release: ");
+    console::kprint(release);
+    console::kprint(b"\n");
 
-    for i in 0..modules.len {
-        let name = &modules.names[i][..modules.lengths[i] as usize];
-        let mut loaded = false;
+    let cfg = unsafe { &*core::ptr::addr_of!(CFG) };
 
-        for ext in [".ko.zst", ".ko.xz", ".ko"] {
-            if load_one(release, name, ext) {
-                loaded = true;
-                break;
-            }
+    if cfg.module_count == 0 {
+        console::kprint(b"[galdr]   No modules to load\n");
+        return;
+    }
+
+    for i in 0..cfg.module_count {
+        let raw = &cfg.modules[i][..64];
+        let name = trim_name(raw);
+
+        if name.is_empty() {
+            continue;
         }
-        if loaded {
+
+        // Modules are stored as .ko (decompressed by generator)
+        if load_one(release, name, ".ko") {
             console::kprint(b"[galdr]   + ");
             console::kprint(name);
             console::kprint(b"\n");
@@ -32,68 +37,6 @@ pub fn load_modules() {
     }
 }
 
-struct ModuleList {
-    names: [[u8; MAX_NAME]; MAX_MODULES],
-    lengths: [u16; MAX_MODULES],
-    len: usize,
-}
-
-impl ModuleList {
-    const fn new() -> Self {
-        Self {
-            names: [[0u8; MAX_NAME]; MAX_MODULES],
-            lengths: [0u16; MAX_MODULES],
-            len: 0,
-        }
-    }
-
-    fn push(&mut self, name: &[u8]) {
-        if self.len >= MAX_MODULES || name.is_empty() {
-            return;
-        }
-        let copy_len = if name.len() < MAX_NAME {
-            name.len()
-        } else {
-            MAX_NAME
-        };
-        self.names[self.len][..copy_len].copy_from_slice(&name[..copy_len]);
-        self.lengths[self.len] = copy_len as u16;
-        self.len += 1;
-    }
-}
-
-fn parse_modules_from_cmdline() -> ModuleList {
-    let mut list = ModuleList::new();
-
-    if let Ok(cmdline) = syscall::read_file(b"/proc/cmdline\0") {
-        for token in cmdline.split(|&b| b == b' ') {
-            if token.starts_with(b"galdr.modules=") {
-                let rest = &token[14..];
-                for module in rest.split(|&b| b == b',') {
-                    if !module.is_empty() {
-                        list.push(module);
-                    }
-                }
-                return list;
-            }
-        }
-    }
-
-    for &m in &[
-        b"virtio" as &[u8],
-        b"virtio_pci",
-        b"virtio_ring",
-        b"virtio_blk",
-        b"ata_piix",
-        b"ahci",
-        b"ext4",
-    ] {
-        list.push(m);
-    }
-
-    list
-}
-
 fn load_one(release: &[u8], name: &[u8], ext: &str) -> bool {
     let mut path = [0u8; 192];
     let mut off = 0;
@@ -102,14 +45,16 @@ fn load_one(release: &[u8], name: &[u8], ext: &str) -> bool {
     path[off..off + prefix.len()].copy_from_slice(prefix);
     off += prefix.len();
 
-    path[off..off + release.len()].copy_from_slice(release);
-    off += release.len();
+    let rel_len = release.len().min(path.len() - off - 1);
+    path[off..off + rel_len].copy_from_slice(&release[..rel_len]);
+    off += rel_len;
 
     path[off] = b'/';
     off += 1;
 
-    path[off..off + name.len()].copy_from_slice(name);
-    off += name.len();
+    let name_len = name.len().min(path.len() - off - ext.len() - 1);
+    path[off..off + name_len].copy_from_slice(&name[..name_len]);
+    off += name_len;
 
     let ext_bytes = ext.as_bytes();
     path[off..off + ext_bytes.len()].copy_from_slice(ext_bytes);
@@ -122,12 +67,35 @@ fn load_one(release: &[u8], name: &[u8], ext: &str) -> bool {
         return false;
     }
 
-    let ret = finit_module(fd as usize, core::ptr::null(), 0);
+    let ret = finit_module(fd as usize, b"\0".as_ptr(), 1, 3);
     syscall::close(fd as usize);
-    ret >= 0
+
+    if ret < 0 {
+        console::kprint(b"[galdr]     finit_module FAIL errno=");
+        print_errno(-ret);
+        console::kprint(b"\n");
+        return false;
+    }
+    true
 }
 
-fn finit_module(fd: usize, params: *const u8, flags: u32) -> isize {
+fn print_errno(err: isize) {
+    let mut buf = [0u8; 12];
+    let mut val = err as usize;
+    let mut i = buf.len();
+    if val == 0 {
+        console::kprint(b"0");
+        return;
+    }
+    while val > 0 && i > 0 {
+        i -= 1;
+        buf[i] = b'0' + (val % 10) as u8;
+        val /= 10;
+    }
+    console::kprint(&buf[i..]);
+}
+
+fn finit_module(fd: usize, params: *const u8, len: usize, flags: u32) -> isize {
     let ret: isize;
     unsafe {
         core::arch::asm!(
@@ -135,7 +103,9 @@ fn finit_module(fd: usize, params: *const u8, flags: u32) -> isize {
             in("rax") 313u64,
             in("rdi") fd,
             in("rsi") params,
-            in("rdx") flags,
+            in("rdx") len,
+            in("r10") flags,
+            in("r8") 0usize,
             out("rcx") _,
             out("r11") _,
             lateout("rax") ret,
@@ -159,6 +129,7 @@ fn read_kernel_release() -> &'static [u8] {
         Err(_) => return b"unknown",
     };
 
+    // Parse "Linux version X.Y.Z (...) ..."
     let mut start = 0;
     let mut spaces = 0;
     for (i, &b) in data.iter().enumerate() {
@@ -179,4 +150,16 @@ fn read_kernel_release() -> &'static [u8] {
     }
 
     b"unknown"
+}
+
+fn trim_name(data: &[u8]) -> &[u8] {
+    let mut start = 0;
+    while start < data.len() && (data[start] == 0 || data[start] == b' ') {
+        start += 1;
+    }
+    let mut end = data.len();
+    while end > start && (data[end - 1] == 0 || data[end - 1] == b' ') {
+        end -= 1;
+    }
+    &data[start..end]
 }

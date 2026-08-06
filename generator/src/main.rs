@@ -1,7 +1,7 @@
 mod compress;
-mod config;
-mod detect;
-mod image;
+pub mod config;
+pub mod hooks;
+pub mod image;
 
 use anyhow::Result;
 use clap::Parser;
@@ -25,10 +25,22 @@ struct Cli {
 
     #[arg(long)]
     dry_run: bool,
+
+    /// List available hooks and exit.
+    #[arg(long)]
+    list_hooks: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.list_hooks {
+        println!("Available hooks:");
+        for hook in hooks::builtin_hooks() {
+            println!("  {:12} {}", hook.name(), hook.help());
+        }
+        return Ok(());
+    }
 
     if cli.verbose {
         eprintln!("[galdr] Galdr v{}", env!("CARGO_PKG_VERSION"));
@@ -40,18 +52,8 @@ fn main() -> Result<()> {
 
     if cli.verbose {
         eprintln!("[galdr] Kernel: {}", cfg.kernel);
+        eprintln!("[galdr] Hooks: {:?}", cfg.hooks);
         eprintln!("[galdr] Compression: {}", cfg.compress);
-        eprintln!("[galdr] Modules: {:?}", cfg.modules);
-        eprintln!("[galdr] Firmware: {:?}", cfg.firmware);
-    }
-
-    let detected = detect::probe_system(&cfg)?;
-
-    if cli.verbose {
-        eprintln!("[galdr] Detected root: {}", detected.root_device);
-        eprintln!("[galdr] Detected fstype: {}", detected.root_fstype);
-        eprintln!("[galdr] Modules found: {}", detected.modules.len());
-        eprintln!("[galdr] Firmware found: {}", detected.firmware.len());
     }
 
     if cli.dry_run {
@@ -59,7 +61,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let image = image::build(&cfg, &detected)?;
+    let image = image::build(&cfg)?;
 
     let mut buf = Vec::new();
     image::write_cpio(&image, &mut buf)?;

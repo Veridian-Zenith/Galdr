@@ -1,3 +1,15 @@
 target/
 *.img
 *.iso
+
+# Test artifacts
+/lib/
+/sbin/init
+/modules
+/sys/
+/proc/
+/dev/
+/run/
+/tmp/
+/sysroot/
+old_root/

@@ -15,5 +15,7 @@ toml = { workspace = true }
 anyhow = { workspace = true }
 clap = { version = "4.0", features = ["derive"] }
 chrono = "0.4"
+walkdir = "2"
 zstd = "0.13"
 flate2 = "1"
+xz2 = "0.1"
