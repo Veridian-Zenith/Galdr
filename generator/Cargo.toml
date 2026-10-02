@@ -18,6 +18,6 @@ serde = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
 clap = { version = "4.0", features = ["derive"] }
-zstd = "0.13"
+zstd = "0.14"
 flate2 = "1"
 xz2 = "0.1"
