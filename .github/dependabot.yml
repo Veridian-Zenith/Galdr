@@ -1,0 +1,57 @@
+version: 2
+
+updates:
+  # Rust dependencies.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: "build(cargo)"
+    groups:
+      # Patch updates churn a lot and rarely conflict; batch them so the PR
+      # list stays readable.
+      patch:
+        applies-to: version-updates
+        update-types:
+          - patch
+      # Serde/thiserror-family minor bumps are the noisiest, so land them alone.
+      serde:
+        patterns:
+          - "serde"
+          - "serde_*"
+          - "syn"
+          - "proc-macro2"
+          - "quote"
+      compression:
+        patterns:
+          - "zstd*"
+          - "flate2"
+          - "xz2"
+          - "miniz_oxide"
+
+  # GitHub Actions used by the workflows in this directory.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "build(actions)"
+    groups:
+      actions:
+        patterns:
+          - "*"
