@@ -9,6 +9,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Least privilege. Building and testing only needs to read the repo.
+# Artifact upload authenticates via ACTIONS_RUNTIME_TOKEN, not GITHUB_TOKEN
+# scopes, so it needs nothing extra here. Without this block the job inherits
+# the repo default (full contents/packages/actions write), which it never uses.
+permissions:
+  contents: read
+
 jobs:
   check:
     name: Lint & Build
