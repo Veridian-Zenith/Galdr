@@ -135,13 +135,9 @@ fn write_init_config(ctx: &mut BuildContext, cfg: &Config) -> Result<()> {
     config.push_str(&format!("TIMEOUT={}\n", cfg.timeout));
     config.push_str(&format!("FALLBACK=\"{}\"\n", cfg.fallback));
 
-    // Early modules
-    config.push_str(&format!(
-        "EARLYMODULES=\"{}\"\n",
-        cfg.early_modules.join(" ")
-    ));
-
-    // Runtime hook script paths
+    // Runtime hook script paths.
+    // Note: init currently parses only MODULES/ROOT/TIMEOUT/FALLBACK. The hook
+    // lists below are written for forward compatibility and are not executed yet.
     for (_, name) in &ctx.runtime_hooks {
         let hook_path = format!("hooks/{}", name);
         if ctx.buildroot.join(&hook_path).exists() {
@@ -342,5 +338,202 @@ fn write_cpio_header_bytes(buf: &mut [u8; 110], h: &CpioHeader) {
         let hex = format!("{:08x}", val);
         let start = 6 + i * 8;
         buf[start..start + 8].copy_from_slice(hex.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One decoded newc entry, as a reader of the archive would see it.
+    struct Parsed {
+        name: String,
+        mode: u32,
+        filesize: u32,
+        data: Vec<u8>,
+    }
+
+    /// Independent newc (ASCII "070701") reader.
+    ///
+    /// Deliberately written against the format spec rather than by mirroring
+    /// `write_cpio_entry`, so it can actually catch encoder bugs.
+    fn parse_newc(bytes: &[u8]) -> (Vec<Parsed>, bool) {
+        let mut entries = Vec::new();
+        let mut pos = 0usize;
+        let mut saw_trailer = false;
+
+        while pos + 110 <= bytes.len() {
+            assert_eq!(&bytes[pos..pos + 6], b"070701", "bad magic at offset {pos}");
+
+            let hex = |off: usize| -> u32 {
+                let s = std::str::from_utf8(&bytes[pos + off..pos + off + 8]).unwrap();
+                u32::from_str_radix(s, 16).unwrap()
+            };
+
+            let mode = hex(6 + 8);
+            let filesize = hex(6 + 48);
+            let namesize = hex(6 + 88);
+
+            let name_start = pos + 110;
+            let name_end = name_start + namesize as usize;
+            assert!(name_end <= bytes.len(), "name runs past end of archive");
+            let name_bytes = &bytes[name_start..name_end];
+            assert_eq!(
+                name_bytes.last(),
+                Some(&0),
+                "name field must be NUL-terminated"
+            );
+            let name = String::from_utf8_lossy(&name_bytes[..namesize as usize - 1]).to_string();
+
+            // newc pads the header+name to a 4-byte boundary.
+            let mut data_start = name_end;
+            let pad = (4 - (data_start % 4)) % 4;
+            data_start += pad;
+
+            let data_end = data_start + filesize as usize;
+            assert!(data_end <= bytes.len(), "data runs past end of archive");
+            let data = bytes[data_start..data_end].to_vec();
+
+            if name == "TRAILER!!!" {
+                saw_trailer = true;
+                break;
+            }
+            entries.push(Parsed {
+                name,
+                mode,
+                filesize,
+                data,
+            });
+
+            let data_pad = (4 - (filesize as usize % 4)) % 4;
+            pos = data_end + data_pad;
+        }
+
+        (entries, saw_trailer)
+    }
+
+    fn file(path: &str, content: &[u8], mode: u32) -> ImageEntry {
+        ImageEntry::File {
+            path: path.to_string(),
+            content: content.to_vec(),
+            mode,
+        }
+    }
+
+    #[test]
+    fn roundtrip_preserves_name_mode_and_content() {
+        let img = Image {
+            main_entries: vec![
+                ImageEntry::Directory {
+                    path: "etc".into(),
+                    mode: 0o755,
+                },
+                file("etc/galdr.conf", b"compress = \"zstd\"\n", 0o644),
+                file("init", b"\x7fELF-ish", 0o755),
+            ],
+        };
+
+        let mut buf = Vec::new();
+        write_cpio(&img, &mut buf).unwrap();
+
+        let (entries, saw_trailer) = parse_newc(&buf);
+        assert!(saw_trailer, "archive must end with a TRAILER!!! record");
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].name, "etc");
+        assert_eq!(entries[0].mode, 0o040755);
+        assert_eq!(entries[0].filesize, 0);
+
+        assert_eq!(entries[1].name, "etc/galdr.conf");
+        assert_eq!(entries[1].mode, 0o100644);
+        assert_eq!(entries[1].data, b"compress = \"zstd\"\n");
+
+        assert_eq!(entries[2].name, "init");
+        assert_eq!(entries[2].mode, 0o100755);
+        assert_eq!(entries[2].data, b"\x7fELF-ish");
+    }
+
+    /// Every record must start on a 4-byte boundary or the kernel's unpacker
+    /// desynchronises and silently drops the rest of the image.
+    #[test]
+    fn every_record_is_four_byte_aligned() {
+        // Name lengths chosen so header+name straddles each alignment residue.
+        for name_len in 1..40usize {
+            let name: String = "a".repeat(name_len);
+            let img = Image {
+                main_entries: vec![file(&name, b"payload", 0o644)],
+            };
+
+            let mut buf = Vec::new();
+            write_cpio(&img, &mut buf).unwrap();
+
+            let (_, saw_trailer) = parse_newc(&buf);
+            assert!(
+                saw_trailer,
+                "name length {name_len} produced an unparseable archive"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_file_and_empty_image_are_valid() {
+        let mut buf = Vec::new();
+        write_cpio(
+            &Image {
+                main_entries: vec![],
+            },
+            &mut buf,
+        )
+        .unwrap();
+        let (entries, saw_trailer) = parse_newc(&buf);
+        assert!(entries.is_empty());
+        assert!(saw_trailer);
+
+        let mut buf = Vec::new();
+        write_cpio(
+            &Image {
+                main_entries: vec![file("empty", b"", 0o644)],
+            },
+            &mut buf,
+        )
+        .unwrap();
+        let (entries, _) = parse_newc(&buf);
+        assert_eq!(entries[0].data.len(), 0);
+    }
+
+    /// Content whose length is not a multiple of 4 exercises the data padding.
+    #[test]
+    fn unpadded_payloads_survive() {
+        for len in 0..24usize {
+            let payload: Vec<u8> = (0..len).map(|i| i as u8).collect();
+            let img = Image {
+                main_entries: vec![file("data", &payload, 0o644)],
+            };
+            let mut buf = Vec::new();
+            write_cpio(&img, &mut buf).unwrap();
+
+            let (entries, _) = parse_newc(&buf);
+            assert_eq!(entries[0].data, payload, "payload of length {len}");
+        }
+    }
+
+    #[test]
+    fn init_config_records_reach_the_archive() {
+        // Guards the buildroot -> image path that init's Phase 2 depends on.
+        let mut ctx = BuildContext::new(std::env::temp_dir().join("galdr-test-br"), "1.2.3".into());
+        let _ = std::fs::remove_dir_all(&ctx.buildroot);
+        std::fs::create_dir_all(&ctx.buildroot).unwrap();
+        ctx.add_bytes("galdr/config", b"ROOT=\"auto\"\n", 0o644)
+            .unwrap();
+
+        let image = image_from_buildroot(&ctx).unwrap();
+        let mut buf = Vec::new();
+        write_cpio(&image, &mut buf).unwrap();
+
+        let (entries, _) = parse_newc(&buf);
+        let cfg = entries.iter().find(|e| e.name == "galdr/config").unwrap();
+        assert_eq!(cfg.data, b"ROOT=\"auto\"\n");
+
+        let _ = std::fs::remove_dir_all(&ctx.buildroot);
     }
 }

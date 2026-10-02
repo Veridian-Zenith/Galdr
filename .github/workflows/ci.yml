@@ -26,13 +26,23 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo clippy --release --workspace -- -D warnings
+        run: env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo clippy --release --workspace --all-targets -- -D warnings
 
       - name: Build
         run: env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo build --release --workspace
 
-      - name: Test dry-run
-        run: env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo run --release -- --dry-run --verbose || true
+      - name: Test
+        run: env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo test --workspace
+
+      # The generator only produces a real image as root with /lib/modules and
+      # /lib/firmware present, which CI does not have -- so exercise the CLI
+      # surface that must work anywhere: flag parsing and hook listing.
+      - name: CLI smoke test
+        run: |
+          set -euo pipefail
+          ./target/release/galdr --list-hooks
+          ./target/release/galdr --version
+          ./target/release/galdr --help
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

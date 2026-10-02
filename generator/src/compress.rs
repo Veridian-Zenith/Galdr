@@ -35,18 +35,13 @@ fn compress_gzip(data: &[u8], output: &Path) -> Result<()> {
 }
 
 fn compress_xz(data: &[u8], output: &Path) -> Result<()> {
-    let mut cmd = std::process::Command::new("xz");
-    cmd.args(["-9", "-c"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::from(std::fs::File::create(output)?));
-
-    let mut child = cmd.spawn().context("Failed to run xz. Is it installed?")?;
-
-    if let Some(ref mut stdin) = child.stdin {
-        std::io::Write::write_all(stdin, data)?;
-    }
-
-    child.wait()?;
+    // Uses the xz2 crate rather than shelling out, so the generator has no
+    // runtime dependency on an `xz` binary being installed.
+    let file = std::fs::File::create(output)
+        .with_context(|| format!("Failed to create {}", output.display()))?;
+    let mut encoder = xz2::write::XzEncoder::new(file, 9);
+    encoder.write_all(data)?;
+    encoder.finish()?;
     Ok(())
 }
 
@@ -56,13 +51,21 @@ fn compress_lz4(data: &[u8], output: &Path) -> Result<()> {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::from(std::fs::File::create(output)?));
 
-    let mut child = cmd.spawn().context("Failed to run lz4. Is it installed?")?;
+    let mut child = cmd
+        .spawn()
+        .context("Failed to run lz4. Install it or choose another algorithm.")?;
 
     if let Some(ref mut stdin) = child.stdin {
-        std::io::Write::write_all(stdin, data)?;
+        stdin.write_all(data)?;
     }
 
-    child.wait()?;
+    // Drop stdin before waiting: lz4 waits for EOF before it will finish.
+    drop(child.stdin.take());
+
+    let status = child.wait()?;
+    if !status.success() {
+        anyhow::bail!("lz4 exited with {status}");
+    }
     Ok(())
 }
 

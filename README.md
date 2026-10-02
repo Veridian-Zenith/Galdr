@@ -14,10 +14,33 @@ No bash scripts. No busybox. No libc at runtime.
 - **modinfo dependency resolution** — Recursive module dep resolution with dedup and optional (`?`) module support
 - **ldd binary resolution** — Automatically includes shared library dependencies
 - **Hardware autodetect** — Scans sysfs/drivers, findmnt, `/proc/mounts` to minimize included modules
-- **Compression** — zstd (default), gzip, xz, lz4 via native Rust crates
+- **Compression** — zstd (default), gzip, xz via native Rust crates; lz4 via the `lz4` binary
 - **Fallback handling** — Tries fallback block devices, drops to recovery shell on failure
-- **LUKS support** — Optional encryption module
-- **Minimal init** — ~300 line `#![no_std]` init binary, no libc dependency, baseline x86-64
+- **Minimal init** — `#![no_std]` init binary, no libc dependency, baseline x86-64
+
+## Not implemented
+
+- **LUKS / encrypted root** — `dm-crypt` modules can be included via `modules`, but
+  there is no unlock step, so an encrypted root will not boot.
+- **Runtime hooks** — hooks are build-time only. `EARLYHOOKS`/`HOOKS`/`LATEHOOKS`/
+  `CLEANUPHOOKS` are written to `/galdr/config` for forward compatibility but init
+  does not execute them.
+- **Early CPIO** — microcode and pre-compressed files are not emitted separately.
+- **`--dry-run`** — prints the resolved config and exits; it does not simulate the
+  build. Use `--list-hooks` to inspect available hooks.
+
+## Tests
+
+```bash
+env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo test --workspace
+```
+
+Covers CPIO encoding (round-tripped through an independent newc parser), config
+parsing, hook resolution, and module/library dependency handling.
+
+`galdr-init` is not covered by `cargo test` — it is a `#![no_std]` `#![no_main]`
+binary with its own panic handler, which the libtest harness cannot link. Its
+correctness is verified by booting in QEMU; see CONTRIBUTING.md for the checklist.
 
 ## Building
 
@@ -35,18 +58,18 @@ env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo build --release
 # Build
 env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo build --release
 
-# Generate initramfs (reads /etc/galdr/galdr.toml)
+# Generate initramfs (reads /etc/galdr/galdr.toml, writes $output)
 sudo ./target/release/galdr
 
 # Or with custom config
 sudo ./target/release/galdr --config /etc/galdr/galdr.toml --verbose
 
-# Preview what would be built (no image created)
-sudo ./target/release/galdr --dry-run --verbose
-
 # List available hooks
 ./target/release/galdr --list-hooks
 ```
+
+`--output` selects the image path (default `/boot/initramfs-linux.img`). It is a
+CLI flag only — the config file has no `output` key, since `--output` always wins.
 
 ## Installing
 
@@ -67,7 +90,20 @@ sudo install -Dm644 config/galdr.toml /etc/galdr/galdr.toml
 ```
 
 Builds the init binary, creates a minimal ext4 rootfs, and boots in QEMU with KVM.
-The init boots through all phases: VFS → modules → root mount → chroot → exec `/sbin/init`.
+This exercises the init binary only — it does **not** run the generator, so it
+does not cover hook resolution, module packaging, or CPIO encoding. For a full
+check, generate a real image and boot that:
+
+```bash
+sudo ./target/release/galdr --config config/galdr.toml --output /tmp/test.img
+qemu-system-x86_64 -kernel /boot/vmlinuz-$(uname -r) \
+    -initrd /tmp/test.img \
+    -append "root=/dev/vda rw console=ttyS0,115200n8" \
+    -drive file=/path/to/rootfs.img,format=raw,if=virtio \
+    -m 512M -nographic -accel kvm -no-reboot
+```
+
+See the boot checklist in CONTRIBUTING.md for what a healthy boot looks like.
 
 ## Configuration
 
@@ -76,20 +112,15 @@ Default config location: `/etc/galdr/galdr.toml`
 ```toml
 kernel = "auto"
 compress = "zstd"
-output = "/boot/initramfs-linux.img"
 root = "auto"
 timeout = 10
 fallback = "shell"
-luks = false
 
-# Hooks to run, in order. "base" is always first.
+# Hooks to run, in order. "base" is always forced to the front.
 hooks = ["base", "autodetect", "block", "filesystems", "modconf"]
 
-# Modules to load early (before hooks)
-# early_modules = ["i915"]
-
-# Explicit module list (overrides autodetect)
-# modules = ["ext4", "nvme", "usbcore"]
+# Explicit module list (overrides autodetect). "?" marks a module optional.
+# modules = ["ext4", "nvme", "ahci?"]
 
 # Additional binaries to include (ldd-resolved)
 # binaries = ["/usr/bin/strace"]
@@ -150,7 +181,7 @@ The init binary runs in phases:
 2. **Config** — Parse `/galdr/config` (written by generator)
 3. **Modules** — Load kernel modules via `finit_module` syscall
 4. **Root** — Detect root device (config → cmdline → `/proc/mounts` → fallback scan)
-5. **Switch root** — `pivot_root` → exec `/sbin/init` (falls back to `chroot`)
+5. **Switch root** — `pivot_root` (detaches the initramfs) → remount `/proc`, `/sys`, `/dev` in the new root → exec `/sbin/init`. Falls back to `chroot` only if `pivot_root` fails, which leaves the initramfs resident.
 
 ## Project Structure
 
@@ -159,32 +190,33 @@ Galdr/
 ├── Cargo.toml              # Workspace root
 ├── config/galdr.toml       # Default config
 ├── docs/                   # Architecture docs
-├── generator/              # Generator tool (full Rust, runs on host)
-│   └── src/
-│       ├── main.rs         # CLI entry point
-│       ├── config.rs       # TOML config parser
-│       ├── image.rs        # CPIO builder
-│       ├── compress.rs     # zstd/gzip/xz/lz4 compression
-│       ├── detect.rs       # System detection (legacy, being integrated into hooks)
-│       └── hooks/          # Hook plugin system
-│           ├── mod.rs      # Hook trait, BuildContext, modinfo/ldd helpers
-│           ├── base.rs     # VFS dirs, init binary
-│           ├── autodetect.rs  # Hardware detection
-│           ├── block.rs    # Storage driver modules
-│           ├── filesystems.rs # Filesystem modules
-│           └── modconf.rs  # modprobe.d config
+├── generator/              # Generator library + CLI
+│   ├── src/
+│   │   ├── lib.rs          # Library root (unit tests live here)
+│   │   ├── main.rs         # CLI entry point (thin wrapper over the lib)
+│   │   ├── config.rs       # TOML config parser
+│   │   ├── image.rs        # CPIO builder
+│   │   ├── compress.rs     # zstd/gzip/xz/lz4 compression
+│   │   └── hooks/          # Hook plugin system
+│   │       ├── mod.rs      # Hook trait, BuildContext, modinfo/ldd helpers
+│   │       ├── base.rs     # VFS dirs, init binary
+│   │       ├── autodetect.rs  # Hardware detection
+│   │       ├── block.rs    # Storage driver modules
+│   │       ├── filesystems.rs # Filesystem modules
+│   │       └── modconf.rs  # modprobe.d config
 ├── init/                   # Init binary (#![no_std], runs in initramfs)
+│   ├── Cargo.toml          # test = false (see CONTRIBUTING.md)
 │   ├── build.rs            # cc build script (baseline x86-64)
 │   └── src/
 │       ├── main.rs         # Phase-based boot
-│       ├── console.rs      # kprint, readable
+│       ├── console.rs      # kprint, readable, print_num
 │       ├── modules.rs      # finit_module loading
 │       ├── mount.rs        # VFS + root mounting
 │       ├── root.rs         # Root detection
 │       └── syscall.rs      # Raw x86_64 syscalls
 └── scripts/
     ├── install.sh          # Install script
-    └── qemu-test.sh        # QEMU test harness
+    └── qemu-test.sh        # Init-only QEMU harness
 ```
 
 ## Requirements
@@ -192,6 +224,9 @@ Galdr/
 - Rust 2024 edition
 - Root access (to read /proc, /lib/modules, /lib/firmware)
 - Build tools: `modinfo`, `ldd` (from kmod/glibc)
+- Optional: the `lz4` binary, only if `compress = "lz4"`. zstd, gzip and xz are
+  built in.
+- A C compiler for the init binary's memcpy shim (`init/src/libc.c`)
 
 ## License
 

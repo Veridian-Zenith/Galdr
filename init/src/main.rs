@@ -20,7 +20,9 @@ use core::panic::PanicInfo;
 ///   ROOT="auto"
 ///   TIMEOUT=10
 ///   FALLBACK="shell"
-///   EARLYMODULES=""
+///
+/// Only MODULES, ROOT, TIMEOUT and FALLBACK are parsed today; the hook lists are
+/// reserved for runtime hooks, which are not executed yet.
 #[repr(C)]
 pub struct Config {
     modules: [[u8; 64]; 64],
@@ -46,8 +48,21 @@ fn panic(_info: &PanicInfo) -> ! {
     syscall::reboot();
 }
 
+/// True ELF entry. The kernel hands control over with rsp 16-byte aligned
+/// (rsp % 16 == 0), but Rust codegen assumes the SysV convention where rsp % 16
+/// == 8 at function entry. Any `call` out of a non-conforming frame leaves every
+/// callee misaligned by 8, so the first aligned SSE spill (movaps) raises #GP.
+/// Align here, then let the call push the 8 bytes the ABI expects.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    unsafe {
+        core::arch::asm!("and rsp, -16", "call galdr_main", options(preserves_flags),);
+    }
+    unsafe { core::arch::asm!("cli; hlt", options(noreturn)) };
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn galdr_main() -> ! {
     console::kprint(b"[galdr] Galdr init v0.2.0\n");
 
     setup_signals();
@@ -190,11 +205,16 @@ fn try_fallback_devices() -> bool {
         None => return false,
     };
 
-    while let Some(name) = dir.next() {
-        if name.starts_with(b"sd")
-            || name.starts_with(b"vd")
-            || name.starts_with(b"nvme")
-            || name.starts_with(b"mmcblk")
+    while let Some((name, d_type)) = dir.next_entry() {
+        // Only whole block devices are mountable. Misc char devices share the
+        // device namespace — e.g. loading nvme-fabrics.ko creates /dev/nvme-fabrics,
+        // which matches the "nvme" prefix but can never be mounted.
+        let is_dev = d_type == syscall::DT_BLK || d_type == syscall::DT_UNKNOWN;
+        if is_dev
+            && (name.starts_with(b"sd")
+                || name.starts_with(b"vd")
+                || name.starts_with(b"nvme")
+                || name.starts_with(b"mmcblk"))
         {
             let mut dev = [0u8; 64];
             dev[..5].copy_from_slice(b"/dev/");
@@ -218,29 +238,38 @@ fn try_fallback_devices() -> bool {
 fn switch_root_and_exec() -> ! {
     console::kprint(b"[galdr] Switching root...\n");
 
-    let ret = syscall::pivot_root(b"/sysroot\0".as_ptr(), b"/old_root\0".as_ptr());
+    // pivot_root(new_root, put_old) requires:
+    //   - new_root to be a mount point (the root device mount already qualifies)
+    //   - put_old to live *under* new_root, so the initramfs ends up at /old_root
+    // A self bind mount here is not just unnecessary, it makes the kernel report
+    // EBUSY (MNT_LOCKED), so don't add one.
+    syscall::mkdir(b"/sysroot/old_root\0".as_ptr(), 0o755);
+
+    let ret = syscall::pivot_root(b"/sysroot\0".as_ptr(), b"/sysroot/old_root\0".as_ptr());
     if ret < 0 {
-        console::kprint(b"[galdr] pivot_root failed, trying chroot fallback\n");
+        console::kprint(b"[galdr] pivot_root failed errno=");
+        console::print_num((-ret) as usize);
+        console::kprint(b", chroot fallback\n");
         syscall::chroot(b"/sysroot\0".as_ptr());
+    } else {
+        // Only meaningful after a real pivot_root: the initramfs now lives at
+        // /old_root, so detach it or it stays resident in the new root.
+        syscall::umount2(b"/old_root\0".as_ptr(), syscall::MNT_DETACH);
+        syscall::rmdir(b"/old_root\0".as_ptr());
     }
 
     syscall::chdir(b"/\0".as_ptr());
 
-    syscall::umount2(b"/old_root\0".as_ptr(), syscall::MNT_DETACH);
-    syscall::rmdir(b"/old_root\0".as_ptr());
-
-    syscall::umount2(b"/proc\0".as_ptr(), 0);
-    syscall::umount2(b"/sys\0".as_ptr(), 0);
-    syscall::umount2(b"/dev\0".as_ptr(), 0);
+    // Re-mount the VFS inside the new root: the initramfs mounts are gone with it.
+    // Best effort — the real init is what ultimately needs these.
+    let _ = mount::mount_initramfs_vfs();
 
     console::kprint(b"[galdr] Executing /sbin/init...\n");
 
+    // execve needs a NULL-terminated argv, not a NULL argv pointer.
+    let argv0: [*const u8; 2] = [b"/sbin/init\0".as_ptr(), core::ptr::null()];
     let mut envp: [*const u8; 1] = [core::ptr::null()];
-    syscall::execve(
-        b"/sbin/init\0".as_ptr(),
-        core::ptr::null(),
-        envp.as_mut_ptr(),
-    );
+    syscall::execve(b"/sbin/init\0".as_ptr(), argv0.as_ptr(), envp.as_mut_ptr());
 
     console::kprint(b"[galdr] Failed to exec /sbin/init\n");
     drop_to_shell();
@@ -250,8 +279,9 @@ fn drop_to_shell() -> ! {
     console::kprint(b"[galdr] Dropping to recovery shell.\n");
     console::kprint(b"[galdr] Type 'reboot' to restart.\n");
 
+    let argv0: [*const u8; 2] = [b"/bin/sh\0".as_ptr(), core::ptr::null()];
     let mut envp: [*const u8; 1] = [core::ptr::null()];
-    syscall::execve(b"/bin/sh\0".as_ptr(), core::ptr::null(), envp.as_mut_ptr());
+    syscall::execve(b"/bin/sh\0".as_ptr(), argv0.as_ptr(), envp.as_mut_ptr());
 
     console::kprint(b"[galdr] No shell found. Halting.\n");
     syscall::reboot();

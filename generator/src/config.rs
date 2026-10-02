@@ -10,16 +10,9 @@ pub struct Config {
     #[serde(default = "default_compress")]
     pub compress: String,
 
-    #[serde(default = "default_output")]
-    pub output: PathBuf,
-
     /// Hooks to run, in order. "base" is always first.
     #[serde(default = "default_hooks")]
     pub hooks: Vec<String>,
-
-    /// Modules to load early (before hooks).
-    #[serde(default)]
-    pub early_modules: Vec<String>,
 
     /// Explicit module list (overrides autodetect).
     #[serde(default)]
@@ -48,10 +41,6 @@ pub struct Config {
     /// Fallback behavior: "shell" or "reboot".
     #[serde(default = "default_fallback")]
     pub fallback: String,
-
-    /// LUKS encryption support.
-    #[serde(default)]
-    pub luks: bool,
 }
 
 fn default_kernel() -> String {
@@ -60,10 +49,6 @@ fn default_kernel() -> String {
 
 fn default_compress() -> String {
     "zstd".to_string()
-}
-
-fn default_output() -> PathBuf {
-    PathBuf::from("/boot/initramfs-linux.img")
 }
 
 fn default_hooks() -> Vec<String> {
@@ -93,9 +78,7 @@ impl Default for Config {
         Self {
             kernel: default_kernel(),
             compress: default_compress(),
-            output: default_output(),
             hooks: default_hooks(),
-            early_modules: vec![],
             modules: vec![],
             binaries: vec![],
             files: vec![],
@@ -103,7 +86,6 @@ impl Default for Config {
             root: default_root(),
             timeout: default_timeout(),
             fallback: default_fallback(),
-            luks: false,
         }
     }
 }
@@ -170,4 +152,120 @@ pub fn detect_running_kernel() -> String {
     }
 
     "latest".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_temp(name: &str, body: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("galdr-cfg-test-{name}.toml"));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn missing_file_yields_defaults() {
+        let cfg = load(Path::new("/nonexistent/galdr.toml")).unwrap();
+        assert_eq!(cfg.compress, "zstd");
+        assert_eq!(cfg.hooks, default_hooks());
+        assert_eq!(cfg.root, "auto");
+        assert_eq!(cfg.timeout, 10);
+        assert_eq!(cfg.fallback, "shell");
+    }
+
+    #[test]
+    fn parses_every_documented_field() {
+        let path = write_temp(
+            "full",
+            r#"
+    kernel = "6.9.1-arch"
+    compress = "gzip"
+    root = "/dev/nvme0n1p2"
+    timeout = 42
+    fallback = "reboot"
+    hooks = ["block", "filesystems"]
+    modules = ["ext4", "nvme?"]
+    binaries = ["/usr/bin/strace"]
+    files = ["/etc/crypttab"]
+    firmware = ["/lib/firmware/example.bin"]
+    "#,
+        );
+
+        let cfg = load(&path).unwrap();
+        assert_eq!(cfg.kernel, "6.9.1-arch");
+        assert_eq!(cfg.compress, "gzip");
+        assert_eq!(cfg.root, "/dev/nvme0n1p2");
+        assert_eq!(cfg.timeout, 42);
+        assert_eq!(cfg.fallback, "reboot");
+        assert_eq!(cfg.modules, vec!["ext4", "nvme?"]);
+        assert_eq!(cfg.binaries, vec![PathBuf::from("/usr/bin/strace")]);
+        assert_eq!(cfg.files, vec![PathBuf::from("/etc/crypttab")]);
+        assert_eq!(
+            cfg.firmware,
+            vec![PathBuf::from("/lib/firmware/example.bin")]
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// init reads /galdr/config, so "base" has to be present and first
+    /// regardless of what the user wrote.
+    #[test]
+    fn base_hook_is_forced_to_the_front() {
+        let path = write_temp(
+            "base",
+            r#"
+hooks = ["filesystems", "block"]
+"#,
+        );
+        let cfg = load(&path).unwrap();
+        assert_eq!(cfg.hooks[0], "base");
+        assert!(cfg.hooks.contains(&"filesystems".to_string()));
+        assert!(cfg.hooks.contains(&"block".to_string()));
+
+        // Idempotent: an explicit base-first list is left alone.
+        let cfg2 = load(&write_temp(
+            "base2",
+            r#"
+hooks = ["base", "block"]
+"#,
+        ))
+        .unwrap();
+        assert_eq!(cfg2.hooks, vec!["base", "block"]);
+
+        // An empty list still gets base.
+        let cfg3 = load(&write_temp("base3", "hooks = []\n")).unwrap();
+        assert_eq!(cfg3.hooks, vec!["base"]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn kernel_auto_resolves_to_a_concrete_version() {
+        let path = write_temp("kauto", "kernel = \"auto\"\n");
+        let cfg = load(&path).unwrap();
+        assert_ne!(cfg.kernel, "auto", "\"auto\" must be resolved at load");
+        assert!(!cfg.kernel.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn malformed_toml_is_an_error_not_a_silent_default() {
+        let path = write_temp("bad", "kernel = \nthis is not toml [[[\n");
+        let err = load(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("Failed to parse config"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn unknown_keys_are_ignored() {
+        let path = write_temp("unknown", "compress = \"xz\"\nnot_a_real_key = 5\n");
+        let cfg = load(&path).unwrap();
+        assert_eq!(cfg.compress, "xz");
+        let _ = std::fs::remove_file(&path);
+    }
 }

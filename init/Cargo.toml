@@ -5,6 +5,16 @@ edition.workspace = true
 license.workspace = true
 description = "Minimal init binary for Galdr initramfs"
 
+# galdr-init is a #![no_std] #![no_main] binary with its own panic handler, so it
+# cannot be built with the libtest harness (duplicate `panic_impl` lang item).
+# Unit tests live in the `galdr` library; this package only ships the binary.
+[[bin]]
+name = "galdr-init"
+path = "src/main.rs"
+test = false
+bench = false
+doctest = false
+
 [dependencies]
 
 [build-dependencies]

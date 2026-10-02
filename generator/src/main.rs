@@ -1,10 +1,9 @@
-mod compress;
-pub mod config;
-pub mod hooks;
-pub mod image;
-
 use anyhow::Result;
 use clap::Parser;
+use galdr::compress;
+use galdr::config;
+use galdr::hooks;
+use galdr::image;
 use std::path::PathBuf;
 
 #[derive(Parser)]

@@ -159,7 +159,35 @@ Base hook runs `/usr/lib/initcpio/busybox --list` to get all applets, creates sy
 
 ---
 
-## What Galdr Should Adopt
+## Status: Adopted vs Not Yet
+
+Recorded 2026-08-06, before implementation. Kept for provenance; the tables below
+were never updated and should not be read as a roadmap. Current state:
+
+| Pattern | Status |
+|---------|--------|
+| Hook trait/plugin architecture | Adopted — `Hook` trait, `BuildContext` |
+| Recursive modinfo dep resolution | Adopted — `BuildContext::add_module` |
+| Optional modules (`?` suffix) | Adopted |
+| Firmware inclusion | Adopted — `add_firmware` |
+| ldd-based library resolution | Adopted — `add_binary` |
+| Buildroot staging | Adopted — `std::env::temp_dir().join("galdr-buildroot")` |
+| `base` hook forced first | Adopted — `config::load` inserts it |
+| Builtin module skipping | Adopted — reads `modules.builtin` |
+| Error accumulation (`!!_builderrors`) | **Not adopted** — `add_module` warns and continues; no counter, exit code is always 0 |
+| Two-stage CPIO (early + main) | **Not adopted** — `Image` has a single `main_entries`; no microcode early segment |
+| Double-compression avoidance | **Not adopted** — modules are always decompressed, never moved to an early segment |
+| Runtime hook phases | **Partial** — `Hookpoint` enum and config plumbing exist, but every hook returns `runtime: vec![]` and init does not execute them |
+| Shebang checking for scripts | **Not adopted** |
+| Device resolution by UUID/LABEL | **Not adopted** — root is `root=` or `/proc/mounts` |
+| Pluggable mount handler / fsck | **Not adopted** — `mount_root` tries ext4, then xfs/btrfs/vfat/ntfs |
+| Sorted/reproducible file list | **Partial** — `read_dir` order is not sorted |
+| LUKS / encrypted root | **Not implemented** — see README "Not implemented" |
+
+The aspirational lists under "Key Differences for Galdr" that follow are the
+original research notes, retained unchanged. The table above is authoritative.
+
+## Key Differences for Galdr
 
 ### From mkinitcpio's Hook System
 - **Hook trait/plugin architecture**: Each hook is a self-contained unit with build-time and optionally runtime behavior

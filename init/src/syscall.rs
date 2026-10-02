@@ -257,7 +257,6 @@ pub struct DirIter {
     len: usize,
     done: bool,
     name_buf: [u8; 256],
-    name_len: usize,
 }
 
 impl DirIter {
@@ -273,13 +272,15 @@ impl DirIter {
             len: 0,
             done: false,
             name_buf: [0u8; 256],
-            name_len: 0,
         })
     }
 
-    /// Returns the next entry name (without null terminator).
+    /// Next entry name (without null terminator), plus its dirent type.
     /// Skips "." and "..".
-    pub fn next(&mut self) -> Option<&[u8]> {
+    ///
+    /// d_type is DT_UNKNOWN (0) on filesystems that don't fill it in, so
+    /// callers must treat 0 as "unknown", not "not a device".
+    pub fn next_entry(&mut self) -> Option<(&[u8], u8)> {
         loop {
             if self.done {
                 return None;
@@ -291,6 +292,7 @@ impl DirIter {
                 }
                 let d_reclen =
                     u16::from_ne_bytes([self.buf[self.pos + 16], self.buf[self.pos + 17]]) as usize;
+                let d_type = self.buf[self.pos + 18];
                 let name_start = self.pos + 19;
                 let name_end = (self.pos + d_reclen).min(self.len);
                 let raw = &self.buf[name_start..name_end];
@@ -303,8 +305,7 @@ impl DirIter {
                 let copy_len = name.len().min(255);
                 self.name_buf[..copy_len].copy_from_slice(&name[..copy_len]);
                 self.name_buf[copy_len] = 0;
-                self.name_len = copy_len;
-                return Some(&self.name_buf[..copy_len]);
+                return Some((&self.name_buf[..copy_len], d_type));
             }
 
             let n = getdents64(self.fd, &mut self.buf);
@@ -326,6 +327,10 @@ impl Drop for DirIter {
 
 pub const O_RDONLY: i32 = 0;
 
+/// Directory entry types from getdents64 that Galdr inspects.
+pub const DT_UNKNOWN: u8 = 0;
+pub const DT_BLK: u8 = 6;
+
 pub const MS_NOSUID: u64 = 2;
 pub const MS_NODEV: u64 = 4;
 pub const MS_NOEXEC: u64 = 8;
@@ -335,8 +340,6 @@ pub const SIGPIPE: i32 = 13;
 pub const SIGCHLD: i32 = 17;
 pub const SIGUSR1: i32 = 10;
 pub const SIGUSR2: i32 = 12;
-#[allow(dead_code)]
-pub const SIG_IGN: usize = 1;
 
 static mut FILE_BUF: [u8; 4096] = [0u8; 4096];
 

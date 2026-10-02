@@ -393,3 +393,177 @@ fn parse_ldd_line(line: &str) -> Option<&str> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_buildroot(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("galdr-hooks-test-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn every_builtin_hook_resolves_by_name() {
+        // A hook reachable from builtin_hooks() but not resolve_hook() would be
+        // silently skipped at build time.
+        for hook in builtin_hooks() {
+            let name = hook.name().to_string();
+            assert!(
+                resolve_hook(&name).is_some(),
+                "hook \"{name}\" is listed but not resolvable"
+            );
+            assert!(!hook.help().is_empty(), "hook \"{name}\" has no help text");
+        }
+    }
+
+    #[test]
+    fn unknown_hook_resolves_to_none() {
+        assert!(resolve_hook("definitely-not-a-hook").is_none());
+    }
+
+    #[test]
+    fn repeated_add_module_never_grows_the_list() {
+        let br = temp_buildroot("dedup");
+        let mut ctx = BuildContext::new(br.clone(), "1.2.3".into());
+
+        // A name that resolves to nothing is skipped before reaching the list, so
+        // asking for it repeatedly must stay a no-op rather than appending.
+        for _ in 0..3 {
+            ctx.add_module("no_such_module_xyz", true).unwrap();
+        }
+        assert!(
+            ctx.ordered_modules.is_empty(),
+            "unresolvable module must not be recorded"
+        );
+
+        // Synthetic builtin short-circuit: is_builtin() returns true and inserts
+        // into added_modules without consulting modinfo or ordered_modules.
+        // Redirect modules_dir into the temp tree -- the default points at the
+        // real /lib/modules and must never be written to.
+        let modules_dir = br.join("modules");
+        ctx.modules_dir = modules_dir.clone();
+        std::fs::create_dir_all(&modules_dir).unwrap();
+        std::fs::write(
+            modules_dir.join("modules.builtin"),
+            "kernel/drivers/test/fake_mod.ko\n",
+        )
+        .unwrap();
+
+        ctx.add_module("drivers_test_fake_mod", true).unwrap();
+        assert!(ctx.added_modules.contains("drivers_test_fake_mod"));
+        assert!(
+            !ctx.ordered_modules
+                .contains(&"drivers_test_fake_mod".to_string()),
+            "builtin modules are not loadable at runtime, so they must not be listed"
+        );
+
+        // Second call hits the dedup set.
+        ctx.add_module("drivers_test_fake_mod", true).unwrap();
+        assert_eq!(
+            ctx.added_modules
+                .iter()
+                .filter(|m| *m == "drivers_test_fake_mod")
+                .count(),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(&br);
+    }
+
+    #[test]
+    fn optional_module_miss_is_silent_required_miss_warns() {
+        let br = temp_buildroot("optional");
+        let mut ctx = BuildContext::new(br, "1.2.3".into());
+
+        // Neither name exists, so both must be skipped without adding anything.
+        ctx.add_module("no_such_module_xyz?", true).unwrap();
+        ctx.add_module("no_such_module_xyz", false).unwrap();
+        assert!(ctx.ordered_modules.is_empty());
+
+        let _ = std::fs::remove_dir_all(&ctx.buildroot);
+    }
+
+    #[test]
+    fn module_name_is_stripped_of_every_compression_suffix() {
+        assert_eq!(
+            module_name_from_path(Path::new("/lib/modules/1.2.3/nvme.ko")).as_deref(),
+            Some("nvme")
+        );
+        assert_eq!(
+            module_name_from_path(Path::new("/lib/modules/1.2.3/nvme.ko.zst")).as_deref(),
+            Some("nvme")
+        );
+        assert_eq!(
+            module_name_from_path(Path::new("/lib/modules/1.2.3/nvme.ko.xz")).as_deref(),
+            Some("nvme")
+        );
+        assert_eq!(module_name_from_path(Path::new("/etc/passwd")), None);
+    }
+
+    /// add_module writes a *decompressed* .ko, because finit_module cannot read
+    /// a compressed module. Verify the decompression actually happens.
+    #[test]
+    fn compressed_modules_are_stored_uncompressed() {
+        let br = temp_buildroot("decompress");
+        let src = br.join("sample.ko.zst");
+        let original: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let mut enc = zstd::Encoder::new(Vec::new(), 3).unwrap();
+        std::io::Write::write_all(&mut enc, &original).unwrap();
+        let compressed = enc.finish().unwrap();
+        std::fs::write(&src, &compressed).unwrap();
+
+        let out = read_module_compressed(&src).unwrap();
+        assert_eq!(out, original, "zstd module must round-trip to raw bytes");
+        assert!(
+            !out.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]),
+            "output is still zstd-framed"
+        );
+
+        let _ = std::fs::remove_dir_all(&br);
+    }
+
+    #[test]
+    fn plain_ko_is_passed_through_unchanged() {
+        let br = temp_buildroot("plain");
+        let src = br.join("plain.ko");
+        let body: Vec<u8> = (0..64u8).collect();
+        std::fs::write(&src, &body).unwrap();
+        assert_eq!(read_module_compressed(&src).unwrap(), body);
+        let _ = std::fs::remove_dir_all(&br);
+    }
+
+    #[test]
+    fn ldd_output_is_parsed_for_library_paths() {
+        assert_eq!(
+            parse_ldd_line("\tlibc.so.6 => /lib/libc.so.6 (0x00007f00)"),
+            Some("/lib/libc.so.6")
+        );
+        assert_eq!(
+            parse_ldd_line("\tlibfoo.so => /usr/lib/libfoo.so (0x00007f00)"),
+            Some("/usr/lib/libfoo.so")
+        );
+        assert_eq!(
+            parse_ldd_line("\t/lib64/ld-linux-x86-64.so.2 (0x00007f00)"),
+            Some("/lib64/ld-linux-x86-64.so.2")
+        );
+
+        // Static binary and unresolved entries must not be mistaken for paths.
+        assert_eq!(parse_ldd_line("\tstatically linked"), None);
+        assert_eq!(parse_ldd_line("\tlinux-vdso.so.1 (0x00007ffd)"), None);
+        assert_eq!(parse_ldd_line("\tnot a dynamic executable"), None);
+    }
+
+    #[test]
+    fn modconf_hook_copies_files_when_present() {
+        // modconf reads host paths, so just assert it is a no-op rather than a
+        // failure when /etc/modprobe.d does not exist.
+        let br = temp_buildroot("modconf");
+        let mut ctx = BuildContext::new(br.clone(), "1.2.3".into());
+        let out = modconf::Modconf.build(&mut ctx).unwrap();
+        assert!(out.runtime.is_empty());
+        let _ = std::fs::remove_dir_all(&br);
+    }
+}
